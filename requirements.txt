@@ -1,0 +1,13 @@
+
+aiogram
+alembic
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+openai
+psycopg2-binary
+python-dotenv
+requests
+SQLAlchemy
+pandas 
+openpyxl

@@ -1,0 +1,68 @@
+# get_refresh_token.py
+import requests
+import os
+from dotenv import load_dotenv
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import webbrowser
+
+load_dotenv()
+
+CLIENT_ID = os.getenv('HH_CLIENT_ID')
+CLIENT_SECRET = os.getenv('HH_CLIENT_SECRET')
+REDIRECT_URI = "http://localhost:8010/"
+
+authorization_code = None
+
+class OAuthCallbackHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        global authorization_code
+        if 'code=' in self.path:
+            authorization_code = self.path.split('code=')[1].split('&')[0]
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Got the code! You can close this window now.")
+            print(f"\n[SUCCESS] Authorization Code received: {authorization_code}")
+        else:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Failed to get authorization code.")
+
+def get_tokens(code):
+    url = "https://hh.ru/oauth/token"
+    data = {
+        'grant_type': 'authorization_code',
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'redirect_uri': REDIRECT_URI,
+        'code': code
+    }
+    response = requests.post(url, data=data)
+    if response.status_code == 200:
+        print("[SUCCESS] Tokens received!")
+        return response.json()
+    else:
+        print(f"[ERROR] Failed to get tokens: {response.text}")
+        return None
+
+if __name__ == "__main__":
+    auth_url = f"https://hh.ru/oauth/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+    
+    print("="*80)
+    print("Step 1: Open the following URL in your browser, log in, and grant access:")
+    print(auth_url)
+    print("="*80)
+    
+    webbrowser.open(auth_url)
+    
+    print("Step 2: Waiting for the authorization code on http://localhost:8000/ ...")
+    
+    httpd = HTTPServer(('localhost', 8000), OAuthCallbackHandler)
+    httpd.handle_request() # This will handle one request and then stop.
+    
+    if authorization_code:
+        tokens = get_tokens(authorization_code)
+        if tokens and 'refresh_token' in tokens:
+            print("\n" + "="*80)
+            print("!!! YOUR REFRESH TOKEN (save it to .env file) !!!")
+            print(f"HH_REFRESH_TOKEN=\"{tokens['refresh_token']}\"")
+            print("="*80)
