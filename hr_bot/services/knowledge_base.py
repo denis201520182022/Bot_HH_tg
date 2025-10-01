@@ -3,7 +3,7 @@ from googleapiclient.discovery import build
 
 # ID вашего гугл-документа. Его можно взять из URL:
 # https://docs.google.com/document/d/THIS_IS_THE_ID/edit
-DOCUMENT_ID = '1Z1qpG6bUP5JEDPONaf3VcivwLKgDPghL41vZJf1BHzs'
+DOCUMENT_ID = '1injke_YH-E2RRHL4PYvXk7kOWPk58-S0cPzLDnzeRnA'
 SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
 SERVICE_ACCOUNT_FILE = 'credentials.json'
 

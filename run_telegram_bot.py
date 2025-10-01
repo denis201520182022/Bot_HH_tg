@@ -2,20 +2,34 @@
 
 import asyncio
 import logging
+import os
+import re # <-- Добавлен импорт для регулярных выражений
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand, BotCommandScopeChat
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
-import os
 
 from hr_bot.utils.logger_config import setup_logging
-from hr_bot.db.models import SessionLocal, TelegramUser, Candidate, NotificationQueue
+from hr_bot.db.models import SessionLocal, TelegramUser, Candidate, NotificationQueue, Dialogue
 from hr_bot.tg_bot.middlewares import DbSessionMiddleware
 from hr_bot.tg_bot.handlers import main_router
 from hr_bot.utils.formatters import mask_fio
 
 logger = logging.getLogger(__name__)
+
+
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ЭКРАНИРОВАНИЯ ---
+def escape_markdown(text: str) -> str:
+    """
+    Экранирует специальные символы для Telegram Markdown (старый стиль).
+    Это необходимо, чтобы переменные с точками, скобками или дефисами не ломали разметку.
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    
+    # Основные символы, которые нужно экранировать в старом Markdown
+    escape_chars = r'_*`['
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 
 async def check_and_send_notifications(bot: Bot):
@@ -48,32 +62,44 @@ async def check_and_send_notifications(bot: Bot):
                     
                     dialogue = candidate.dialogues[0]
                     vacancy = dialogue.vacancy
-                    last_message_history = dialogue.history[-1] if dialogue.history else {}
-                    city = last_message_history.get('extracted_data', {}).get('city', 'Не указан')
+                    
+                    # --- ИСПРАВЛЕНИЕ: Экранируем все данные перед вставкой в сообщение ---
+                    safe_vacancy_title = escape_markdown(vacancy.title)
+                    safe_masked_name = escape_markdown(mask_fio(candidate.full_name))
+                    safe_age = escape_markdown(candidate.age or 'Не указан')
+                    safe_citizenship = escape_markdown(candidate.citizenship or 'Не указано')
+                    safe_city = escape_markdown(candidate.city or 'Не указан') 
+                    # --- ДОБАВЛЯЕМ НОВОЕ ПОЛЕ ---
+                    safe_readiness = escape_markdown(candidate.readiness_to_start or 'Не указано')
+                    # -----------------------------
+                    safe_phone_number = escape_markdown(candidate.phone_number or "—")
 
-                    # --- ИЗМЕНЕНИЕ: Формируем карточку с номером из БД ---
-                    masked_name = mask_fio(candidate.full_name)
-                    phone_number = candidate.phone_number or "—" # Берем номер из БД
-
+                    # Собираем финальное, безопасное для Markdown сообщение
                     message_text = (
-                        f"📌 *Новый кандидат по вакансии:* {vacancy.title}\n"
-                        f"*ФИО:* {masked_name}\n"
-                        f"*Возраст:* {candidate.age or 'Не указан'}\n"
-                        f"*Гражданство:* {candidate.citizenship or 'Не указано'}\n"
-                        f"*Город:* {city}\n"
-                        f"*Номер телефона:* {phone_number}\n" # <-- Подставляем реальный номер
+                        f"📌 *Новый кандидат по вакансии:* {safe_vacancy_title}\n"
+                        f"*ФИО:* {safe_masked_name}\n"
+                        f"*Возраст:* {safe_age}\n"
+                        f"*Гражданство:* {safe_citizenship}\n"
+                        # --- ДОБАВЛЯЕМ НОВУЮ СТРОКУ В ШАБЛОН ---
+                        f"*Готов приступить:* {safe_readiness}\n"
+                        # --------------------------------------
+                        f"*Город:* {safe_city}\n"
+                        f"*Номер телефона:* {safe_phone_number}\n"
                         f"*Статус:* ✅ Прошёл квалификацию"
                     )
                     
+                    sent_count = 0
                     for user in recipients:
                         try:
+                            # parse_mode уже установлен по умолчанию в bot
                             await bot.send_message(chat_id=user.telegram_id, text=message_text)
+                            sent_count += 1
                         except Exception as e:
                             logger.error(f"Не удалось отправить уведомление по задаче {task.id} пользователю {user.telegram_id}: {e}")
                     
                     task.status = 'sent'
                     db_session.commit()
-                    logger.info(f"Уведомление по кандидату {candidate.id} отправлено {len(recipients)} пользователям.")
+                    logger.info(f"Уведомление по кандидату {candidate.id} отправлено {sent_count} пользователям.")
             
             await asyncio.sleep(10)
         except Exception as e:
@@ -90,7 +116,7 @@ async def main():
     
     bot = Bot(
         token=os.getenv("TELEGRAM_BOT_TOKEN"),
-        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
+        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN) # Оставляем ваш режим по умолчанию
     )
     dp = Dispatcher()
     dp.update.middleware(DbSessionMiddleware(session_pool=SessionLocal))
@@ -100,7 +126,7 @@ async def main():
     notification_task = asyncio.create_task(check_and_send_notifications(bot))
     
     await bot.delete_webhook(drop_pending_updates=True)
-    await bot.delete_my_commands()
+    # bot.delete_my_commands() # Убрал, т.к. команды обычно не нужно удалять при каждом запуске
     
     await dp.start_polling(bot)
     

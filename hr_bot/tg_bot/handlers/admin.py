@@ -1,96 +1,169 @@
-# hr_bot/tg_bot/handlers/admin.py
 
 import logging
+import datetime
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.orm import Session
-from hr_bot.db.models import TelegramUser, TrackedVacancy, TrackedRecruiter
+from aiogram.utils.formatting import Text, Bold, Italic, Code
+
+from hr_bot.db.models import TelegramUser, TrackedVacancy, TrackedRecruiter, AppSettings
 from hr_bot.tg_bot.filters import AdminFilter
-from hr_bot.tg_bot.keyboards import create_management_keyboard, role_choice_keyboard, cancel_fsm_keyboard
+from hr_bot.tg_bot.keyboards import (
+    create_management_keyboard, 
+    role_choice_keyboard, 
+    cancel_fsm_keyboard,
+    limits_menu_keyboard,
+    limit_options_keyboard,
+    admin_keyboard
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
-router.message.filter(AdminFilter()) # Защищаем все хэндлеры в этом файле
+router.message.filter(AdminFilter())
 
 # --- FSM Состояния ---
 class UserManagement(StatesGroup):
-    add_id = State()
-    add_name = State()
-    add_role = State()
-    del_id = State()
+    add_id = State(); add_name = State(); add_role = State(); del_id = State()
 
 class VacancyManagement(StatesGroup):
-    add_id = State()
-    add_title = State()
-    del_id = State()
+    add_id = State(); add_title = State(); del_id = State()
 
 class RecruiterManagement(StatesGroup):
-    add_id = State()
-    add_name = State()
-    del_id = State()
+    add_id = State(); add_name = State(); add_refresh_token = State()
+    add_access_token = State(); add_expires_in = State(); del_id = State()
 
-# --- Единый обработчик отмены (команда + кнопка) ---
+class SettingsManagement(StatesGroup):
+    set_limit = State(); set_tariff = State()
+
+# --- Обработчики отмены ---
 @router.message(Command("cancel"))
 async def cancel_command_handler(message: Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state is None:
         await message.answer("Нет активных действий для отмены.")
         return
-    logger.info(f"Админ {message.from_user.id} отменил действие командой.")
     await state.clear()
-    await message.answer("Действие отменено.")
+    await message.answer("Действие отменено.", reply_markup=admin_keyboard)
 
 @router.callback_query(F.data == "cancel_fsm")
 async def cancel_callback_handler(callback: CallbackQuery, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None:
-        await callback.answer("Нет активных действий.", show_alert=True)
-        return
-    logger.info(f"Админ {callback.from_user.id} отменил действие кнопкой.")
     await state.clear()
     await callback.message.edit_text("Действие отменено.")
     await callback.answer()
 
-# --- 1. УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ---
+# --- УПРАВЛЕНИЕ ЛИМИТАМИ И ТАРИФАМИ ---
+@router.message(F.text == "⚙️ Лимиты и Тариф")
+async def limits_menu(message: Message, db_session: Session):
+    settings = db_session.query(AppSettings).filter_by(id=1).first()
+    if not settings:
+        await message.answer("❌ Не удалось загрузить настройки.")
+        return
+    remaining = settings.limit_total - settings.limit_used
+    cost = settings.limit_used * settings.cost_per_response
+    content = Text(
+        Bold("📊 Текущий статус:"), "\n\n",
+        "Лимит: ", Bold(settings.limit_total), " откликов\n",
+        "Использовано: ", Bold(settings.limit_used), " (на сумму: ", Bold(f"{cost:.2f}"), " руб.)\n",
+        "Осталось: ", Bold(remaining), "\n\n",
+        "Текущий тариф: ", Bold(f"{settings.cost_per_response:.2f}"), " руб. за отклик"
+    )
+    await message.answer(**content.as_kwargs(), reply_markup=limits_menu_keyboard)
 
+@router.callback_query(F.data == "set_limit")
+async def start_set_limit(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SettingsManagement.set_limit)
+    await callback.message.answer("Введите новое значение лимита или выберите готовый вариант:", reply_markup=limit_options_keyboard)
+    await callback.answer()
+
+@router.message(SettingsManagement.set_limit)
+async def process_set_limit(message: Message, state: FSMContext, db_session: Session):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Действие отменено.", reply_markup=admin_keyboard)
+        return
+    if not message.text or not message.text.isdigit() or int(message.text) < 0:
+        await message.answer("❌ Лимит должен быть целым числом. Попробуйте еще раз.")
+        return
+    new_limit = int(message.text)
+    settings = db_session.query(AppSettings).filter_by(id=1).first()
+    settings.limit_total = new_limit
+    if (settings.limit_total - settings.limit_used) >= 15:
+        settings.low_limit_notified = False
+    db_session.commit()
+    await state.clear()
+    content = Text("✅ Новый лимит установлен: ", Bold(new_limit), " откликов.")
+    await message.answer(**content.as_kwargs(), reply_markup=admin_keyboard)
+
+@router.callback_query(F.data == "set_tariff")
+async def start_set_tariff(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SettingsManagement.set_tariff)
+    await callback.message.answer("Введите новую стоимость одного отклика в рублях (например: `150.50`).", reply_markup=ReplyKeyboardRemove())
+    await callback.answer()
+
+@router.message(SettingsManagement.set_tariff)
+async def process_set_tariff(message: Message, state: FSMContext, db_session: Session):
+    try:
+        new_tariff = float(message.text.replace(',', '.'))
+        if new_tariff < 0: raise ValueError
+    except (ValueError, TypeError):
+        await message.answer("❌ Тариф должен быть положительным числом. Попробуйте еще раз.")
+        return
+    settings = db_session.query(AppSettings).filter_by(id=1).first()
+    settings.cost_per_response = new_tariff
+    db_session.commit()
+    await state.clear()
+    content = Text("✅ Новый тариф установлен: ", Bold(f"{new_tariff:.2f}"), " руб. за отклик.")
+    await message.answer(**content.as_kwargs(), reply_markup=admin_keyboard)
+
+# --- 1. УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ---
 @router.message(F.text == "👤 Управление пользователями")
 async def user_management_menu(message: Message, db_session: Session):
     users = db_session.query(TelegramUser).all()
-    user_list = "\n".join([f"- *{u.username}* (ID: `{u.telegram_id}`) - _{u.role}_" for u in users])
-    if not user_list:
-        user_list = "В системе пока нет пользователей."
-    await message.answer(
-        f"👥 *Список пользователей:*\n{user_list}\n\nВыберите действие:",
-        reply_markup=create_management_keyboard([], "add_user", "del_user")
-    )
+    content_parts = [Bold("👥 Список пользователей:"), "\n\n"]
+    if not users:
+        content_parts.append(Italic("В системе пока нет пользователей."))
+    else:
+        for u in users:
+            role_emoji = "✨" if u.role == 'admin' else "🧑‍💻"
+            content_parts.extend([
+                f"{role_emoji} ", Bold(u.username), " (ID: ", Code(u.telegram_id), ") - Роль: ", Italic(u.role), "\n"
+            ])
+    content_parts.append("\nВыберите действие:")
+    content = Text(*content_parts)
+    await message.answer(**content.as_kwargs(), reply_markup=create_management_keyboard([], "add_user", "del_user"))
 
 @router.callback_query(F.data == "add_user")
 async def start_add_user(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserManagement.add_id)
-    await callback.message.edit_text("Введите Telegram ID нового пользователя.", reply_markup=cancel_fsm_keyboard)
+    content = Text("Введите Telegram ID нового пользователя.")
+    await callback.message.edit_text(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
     await callback.answer()
 
 @router.message(UserManagement.add_id)
 async def process_add_user_id(message: Message, state: FSMContext, db_session: Session):
     if not message.text or not message.text.isdigit():
-        await message.answer("❌ ID должен быть числом. Попробуйте еще раз.", reply_markup=cancel_fsm_keyboard)
+        content = Text("❌ ID должен быть числом. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
         return
     user_id = message.text
     if db_session.query(TelegramUser).filter_by(telegram_id=user_id).first():
-        await message.answer(f"⚠️ Пользователь с ID `{user_id}` уже существует. Действие отменено.")
+        content = Text("⚠️ Пользователь с ID ", Code(user_id), " уже существует. Действие отменено.")
+        await message.answer(**content.as_kwargs())
         await state.clear()
         return
     await state.update_data(user_id=user_id)
     await state.set_state(UserManagement.add_name)
-    await message.answer("Отлично. Теперь введите имя пользователя (например, `Иван Рекрутер`).", reply_markup=cancel_fsm_keyboard)
+    content = Text("Отлично. Теперь введите имя пользователя (например, ", Code("Иван Рекрутер"), ").")
+    await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
 
 @router.message(UserManagement.add_name)
 async def process_add_user_name(message: Message, state: FSMContext):
     if not message.text:
-        await message.answer("❌ Имя не может быть пустым. Попробуйте еще раз.", reply_markup=cancel_fsm_keyboard)
+        content = Text("❌ Имя не может быть пустым. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
         return
     await state.update_data(user_name=message.text)
     await state.set_state(UserManagement.add_role)
@@ -105,18 +178,21 @@ async def process_add_user_role(callback: CallbackQuery, state: FSMContext, db_s
     db_session.commit()
     await state.clear()
     logger.info(f"Админ {callback.from_user.id} добавил пользователя {user_data['user_id']} с ролью {role}")
-    await callback.message.edit_text(f"✅ *Успех!* Пользователь *{user_data['user_name']}* добавлен с ролью *{role}*.")
+    content = Text("✅ ", Bold("Успех!"), " Пользователь ", Bold(user_data['user_name']), " добавлен с ролью ", Italic(role), ".")
+    await callback.message.edit_text(**content.as_kwargs())
 
 @router.callback_query(F.data == "del_user")
 async def start_del_user(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserManagement.del_id)
-    await callback.message.edit_text("Введите Telegram ID пользователя для удаления.", reply_markup=cancel_fsm_keyboard)
+    content = Text("Введите Telegram ID пользователя для удаления.")
+    await callback.message.edit_text(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
     await callback.answer()
 
 @router.message(UserManagement.del_id)
 async def process_del_user_id(message: Message, state: FSMContext, db_session: Session):
     if not message.text or not message.text.isdigit():
-        await message.answer("❌ ID должен быть числом. Попробуйте еще раз.", reply_markup=cancel_fsm_keyboard)
+        content = Text("❌ ID должен быть числом. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
         return
     user_id_to_delete = message.text
     if str(message.from_user.id) == user_id_to_delete:
@@ -125,51 +201,63 @@ async def process_del_user_id(message: Message, state: FSMContext, db_session: S
         return
     user_to_delete = db_session.query(TelegramUser).filter_by(telegram_id=user_id_to_delete).first()
     if not user_to_delete:
-        await message.answer(f"⚠️ Пользователь с ID `{user_id_to_delete}` не найден. Действие отменено.")
+        content = Text("⚠️ Пользователь с ID ", Code(user_id_to_delete), " не найден. Действие отменено.")
+        await message.answer(**content.as_kwargs())
         await state.clear()
         return
+    deleted_username = user_to_delete.username
+    deleted_id = user_to_delete.telegram_id
     db_session.delete(user_to_delete)
     db_session.commit()
     await state.clear()
-    logger.info(f"Админ {message.from_user.id} удалил пользователя {user_id_to_delete}")
-    await message.answer(f"✅ Пользователь *{user_to_delete.username}* (ID: `{user_id_to_delete}`) был удален.")
-
+    logger.info(f"Админ {message.from_user.id} удалил пользователя {deleted_id}")
+    content = Text("✅ Пользователь ", Bold(deleted_username), " (ID: ", Code(deleted_id), ") был удален.")
+    await message.answer(**content.as_kwargs())
 # --- 2. УПРАВЛЕНИЕ ВАКАНСИЯМИ ---
 
 @router.message(F.text == "📝 Управление вакансиями")
 async def vacancy_management_menu(message: Message, db_session: Session):
     vacancies = db_session.query(TrackedVacancy).all()
-    vacancy_list = "\n".join([f"- *{v.title}* (ID: `{v.vacancy_id}`)" for v in vacancies])
-    if not vacancy_list: vacancy_list = "Список пуст."
-    await message.answer(
-        f"📝 *Отслеживаемые вакансии:*\n{vacancy_list}\n\nВыберите действие:",
-        reply_markup=create_management_keyboard([], "add_vacancy", "del_vacancy")
-    )
+    content_parts = [Bold("📝 Отслеживаемые вакансии:"), "\n\n"]
+    if not vacancies:
+        content_parts.append(Italic("Список пуст."))
+    else:
+        for v in vacancies:
+            content_parts.extend(["- ", Bold(v.title), " (ID: ", Code(v.vacancy_id), ")\n"])
+    content_parts.append("\nВыберите действие:")
+    
+    content = Text(*content_parts)
+    await message.answer(**content.as_kwargs(), reply_markup=create_management_keyboard([], "add_vacancy", "del_vacancy"))
 
 @router.callback_query(F.data == "add_vacancy")
 async def start_add_vacancy(callback: CallbackQuery, state: FSMContext):
     await state.set_state(VacancyManagement.add_id)
-    await callback.message.edit_text("Введите ID вакансии с hh.ru для отслеживания.", reply_markup=cancel_fsm_keyboard)
+    content = Text("Введите ID вакансии с hh.ru для отслеживания.")
+    await callback.message.edit_text(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
     await callback.answer()
 
 @router.message(VacancyManagement.add_id)
 async def process_add_vacancy_id(message: Message, state: FSMContext, db_session: Session):
     if not message.text or not message.text.isdigit():
-        await message.answer("❌ ID должен быть числом. Попробуйте еще раз.", reply_markup=cancel_fsm_keyboard)
+        content = Text("❌ ID должен быть числом. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
         return
     vacancy_id = message.text
     if db_session.query(TrackedVacancy).filter_by(vacancy_id=vacancy_id).first():
-        await message.answer(f"⚠️ Вакансия с ID `{vacancy_id}` уже отслеживается. Действие отменено.")
+        content = Text("⚠️ Вакансия с ID ", Code(vacancy_id), " уже отслеживается. Действие отменено.")
+        await message.answer(**content.as_kwargs())
         await state.clear()
         return
     await state.update_data(vacancy_id=vacancy_id)
     await state.set_state(VacancyManagement.add_title)
-    await message.answer("Отлично. Теперь введите название этой вакансии (для вашего удобства).", reply_markup=cancel_fsm_keyboard)
+    content = Text("Отлично. Теперь введите название этой вакансии (для вашего удобства).")
+    await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
 
 @router.message(VacancyManagement.add_title)
 async def process_add_vacancy_title(message: Message, state: FSMContext, db_session: Session):
     if not message.text:
-        await message.answer("❌ Название не может быть пустым. Попробуйте еще раз.", reply_markup=cancel_fsm_keyboard)
+        content = Text("❌ Название не может быть пустым. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
         return
     data = await state.get_data()
     vacancy_id = data['vacancy_id']
@@ -179,97 +267,163 @@ async def process_add_vacancy_title(message: Message, state: FSMContext, db_sess
     db_session.commit()
     await state.clear()
     logger.info(f"Админ {message.from_user.id} добавил вакансию {title} ({vacancy_id})")
-    await message.answer(f"✅ Вакансия *{title}* (ID: `{vacancy_id}`) добавлена в список.")
+    
+    content = Text("✅ Вакансия ", Bold(title), " (ID: ", Code(vacancy_id), ") добавлена в список.")
+    await message.answer(**content.as_kwargs())
 
 @router.callback_query(F.data == "del_vacancy")
 async def start_del_vacancy(callback: CallbackQuery, state: FSMContext):
     await state.set_state(VacancyManagement.del_id)
-    await callback.message.edit_text("Введите ID вакансии для удаления из списка.", reply_markup=cancel_fsm_keyboard)
+    content = Text("Введите ID вакансии для удаления из списка.")
+    await callback.message.edit_text(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
     await callback.answer()
 
 @router.message(VacancyManagement.del_id)
 async def process_del_vacancy_id(message: Message, state: FSMContext, db_session: Session):
     if not message.text or not message.text.isdigit():
-        await message.answer("❌ ID должен быть числом. Попробуйте еще раз.", reply_markup=cancel_fsm_keyboard)
+        content = Text("❌ ID должен быть числом. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
         return
     vacancy_id = message.text
     vacancy_to_delete = db_session.query(TrackedVacancy).filter_by(vacancy_id=vacancy_id).first()
     if not vacancy_to_delete:
-        await message.answer(f"⚠️ Вакансия с ID `{vacancy_id}` не найдена. Действие отменено.")
+        content = Text("⚠️ Вакансия с ID ", Code(vacancy_id), " не найдена. Действие отменено.")
+        await message.answer(**content.as_kwargs())
         await state.clear()
         return
+    deleted_title = vacancy_to_delete.title
     db_session.delete(vacancy_to_delete)
     db_session.commit()
     await state.clear()
     logger.info(f"Админ {message.from_user.id} удалил вакансию {vacancy_id}")
-    await message.answer(f"✅ Вакансия *{vacancy_to_delete.title}* (ID: `{vacancy_id}`) удалена.")
+    
+    content = Text("✅ Вакансия ", Bold(deleted_title), " (ID: ", Code(vacancy_id), ") удалена.")
+    await message.answer(**content.as_kwargs())
 
 # --- 3. УПРАВЛЕНИЕ РЕКРУТЕРАМИ ---
 
 @router.message(F.text == "👨‍💼 Управление рекрутерами")
 async def recruiter_management_menu(message: Message, db_session: Session):
     recruiters = db_session.query(TrackedRecruiter).all()
-    recruiter_list = "\n".join([f"- *{r.name}* (ID: `{r.recruiter_id}`)" for r in recruiters])
-    if not recruiter_list: recruiter_list = "Список пуст."
-    await message.answer(
-        f"👨‍💼 *Отслеживаемые рекрутеры:*\n{recruiter_list}\n\nВыберите действие:",
-        reply_markup=create_management_keyboard([], "add_recruiter", "del_recruiter")
-    )
+    
+    content_parts = [Bold("👨‍💼 Отслеживаемые рекрутеры:"), "\n\n"]
+    if not recruiters:
+        content_parts.append(Italic("Список пуст."))
+    else:
+        for r in recruiters:
+            content_parts.extend(["- ", Bold(r.name), " (ID: ", Code(r.recruiter_id), ")\n"])
+    content_parts.append("\nВыберите действие:")
+    
+    content = Text(*content_parts)
+    await message.answer(**content.as_kwargs(), reply_markup=create_management_keyboard([], "add_recruiter", "del_recruiter"))
 
 @router.callback_query(F.data == "add_recruiter")
 async def start_add_recruiter(callback: CallbackQuery, state: FSMContext):
     await state.set_state(RecruiterManagement.add_id)
-    await callback.message.edit_text("Введите ID рекрутера с hh.ru для отслеживания.", reply_markup=cancel_fsm_keyboard)
+    content = Text("Шаг 1/5: Введите ID рекрутера (manager id) с hh.ru.")
+    await callback.message.edit_text(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
     await callback.answer()
 
 @router.message(RecruiterManagement.add_id)
 async def process_add_recruiter_id(message: Message, state: FSMContext, db_session: Session):
     if not message.text or not message.text.isdigit():
-        await message.answer("❌ ID должен быть числом. Попробуйте еще раз.", reply_markup=cancel_fsm_keyboard)
+        content = Text("❌ ID должен быть числом. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
         return
     recruiter_id = message.text
     if db_session.query(TrackedRecruiter).filter_by(recruiter_id=recruiter_id).first():
-        await message.answer(f"⚠️ Рекрутер с ID `{recruiter_id}` уже отслеживается. Действие отменено.")
+        content = Text("⚠️ Рекрутер с ID ", Code(recruiter_id), " уже отслеживается. Действие отменено.")
+        await message.answer(**content.as_kwargs())
         await state.clear()
         return
     await state.update_data(recruiter_id=recruiter_id)
     await state.set_state(RecruiterManagement.add_name)
-    await message.answer("Отлично. Теперь введите имя рекрутера (для вашего удобства).", reply_markup=cancel_fsm_keyboard)
+    content = Text("Шаг 2/5: Отлично. Теперь введите имя рекрутера (для вашего удобства).")
+    await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
 
 @router.message(RecruiterManagement.add_name)
-async def process_add_recruiter_name(message: Message, state: FSMContext, db_session: Session):
+async def process_add_recruiter_name(message: Message, state: FSMContext):
     if not message.text:
-        await message.answer("❌ Имя не может быть пустым. Попробуйте еще раз.", reply_markup=cancel_fsm_keyboard)
+        content = Text("❌ Имя не может быть пустым. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
         return
+    await state.update_data(name=message.text)
+    await state.set_state(RecruiterManagement.add_refresh_token)
+    content = Text("Шаг 3/5: Имя принято. Теперь вставьте REFRESH TOKEN, полученный от hh.ru.")
+    await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
+
+@router.message(RecruiterManagement.add_refresh_token)
+async def process_add_refresh_token(message: Message, state: FSMContext):
+    if not message.text:
+        content = Text("❌ Токен не может быть пустым. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
+        return
+    await state.update_data(refresh_token=message.text)
+    await state.set_state(RecruiterManagement.add_access_token)
+    content = Text("Шаг 4/5: Refresh token принят. Теперь вставьте ACCESS TOKEN.")
+    await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
+
+@router.message(RecruiterManagement.add_access_token)
+async def process_add_access_token(message: Message, state: FSMContext):
+    if not message.text:
+        content = Text("❌ Токен не может быть пустым. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
+        return
+    await state.update_data(access_token=message.text)
+    await state.set_state(RecruiterManagement.add_expires_in)
+    content = Text("Шаг 5/5: Access token принят. Теперь введите время его жизни в секундах (expires_in).")
+    await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
+
+@router.message(RecruiterManagement.add_expires_in)
+async def process_add_expires_in(message: Message, state: FSMContext, db_session: Session):
+    if not message.text or not message.text.isdigit():
+        content = Text("❌ Время жизни должно быть числом. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
+        return
+    
+    expires_in = int(message.text)
     data = await state.get_data()
-    recruiter_id = data['recruiter_id']
-    name = message.text
-    new_recruiter = TrackedRecruiter(recruiter_id=recruiter_id, name=name)
+    expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=expires_in)
+    
+    new_recruiter = TrackedRecruiter(
+        recruiter_id=data['recruiter_id'], name=data['name'],
+        refresh_token=data['refresh_token'], access_token=data['access_token'],
+        token_expires_at=expires_at
+    )
     db_session.add(new_recruiter)
     db_session.commit()
     await state.clear()
-    logger.info(f"Админ {message.from_user.id} добавил рекрутера {name} ({recruiter_id})")
-    await message.answer(f"✅ Рекрутер *{name}* (ID: `{recruiter_id}`) добавлен в список.")
+    
+    logger.info(f"Админ {message.from_user.id} добавил рекрутера {data['name']} ({data['recruiter_id']})")
+    content = Text("✅ ", Bold("Успех!"), " Рекрутер ", Bold(data['name']), " добавлен в список отслеживания.")
+    await message.answer(**content.as_kwargs())
 
 @router.callback_query(F.data == "del_recruiter")
 async def start_del_recruiter(callback: CallbackQuery, state: FSMContext):
     await state.set_state(RecruiterManagement.del_id)
-    await callback.message.edit_text("Введите ID рекрутера для удаления из списка.", reply_markup=cancel_fsm_keyboard)
+    content = Text("Введите ID рекрутера для удаления из списка.")
+    await callback.message.edit_text(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
     await callback.answer()
 
 @router.message(RecruiterManagement.del_id)
 async def process_del_recruiter_id(message: Message, state: FSMContext, db_session: Session):
     if not message.text or not message.text.isdigit():
-        await message.answer("❌ ID должен быть числом. Попробуйте еще раз.", reply_markup=cancel_fsm_keyboard)
+        content = Text("❌ ID должен быть числом. Попробуйте еще раз.")
+        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
         return
     recruiter_id = message.text
     recruiter_to_delete = db_session.query(TrackedRecruiter).filter_by(recruiter_id=recruiter_id).first()
     if not recruiter_to_delete:
-        await message.answer(f"⚠️ Рекрутер с ID `{recruiter_id}` не найден. Действие отменено.")
+        content = Text("⚠️ Рекрутер с ID ", Code(recruiter_id), " не найден. Действие отменено.")
+        await message.answer(**content.as_kwargs())
         await state.clear()
         return
+    
+    deleted_name = recruiter_to_delete.name
     db_session.delete(recruiter_to_delete)
     db_session.commit()
     await state.clear()
     logger.info(f"Админ {message.from_user.id} удалил рекрутера {recruiter_id}")
-    await message.answer(f"✅ Рекрутер *{recruiter_to_delete.name}* (ID: `{recruiter_id}`) удален.")
+    
+    content = Text("✅ Рекрутер ", Bold(deleted_name), " (ID: ", Code(recruiter_id), ") удален.")
+    await message.answer(**content.as_kwargs())

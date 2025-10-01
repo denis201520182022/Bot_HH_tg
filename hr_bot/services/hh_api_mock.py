@@ -1,57 +1,55 @@
 # hr_bot/services/hh_api_mock.py
 import time
 
-# --- Сценарий 3: Кандидат пишет сообщения с перерывами ---
-# Это "лента" с сообщениями. Каждый элемент списка - это то, 
-# что бот получит за один цикл проверки.
-_MOCKED_MESSAGES_SCRIPT = [
-    # Цикл 1: Кандидат пишет первое сообщение
-    {"12348": ["Здравствуйте!"]},
+# --- Глобальное состояние для имитации "прочитанных" откликов ---
+_initial_responses_sent = False
+
+def get_new_responses(recruiter=None, vacancy_ids=None, db=None):
+    """
+    Имитирует реальное API: возвращает новые отклики ТОЛЬКО ПРИ ПЕРВОМ ВЫЗОВЕ.
+    На все последующие вызовы возвращает пустой список.
+    """
+    global _initial_responses_sent
     
-    # Цикл 2: Кандидат пишет второе сообщение (прошло 15 сек)
-    {"12348": ["Это снова я. Хотел уточнить по поводу графика."]},
+    print("MOCK_API: Запрос новых откликов...")
     
-    # Цикл 3: Кандидат молчит (прошло еще 15 сек, итого 15 с момента последнего сообщения)
-    # Бот должен продолжать ждать, т.к. 15 < 20 (DEBOUNCE_DELAY)
-    {}, 
-
-    # Цикл 4: Кандидат снова молчит (прошло еще 15 сек, итого 30 с момента последнего сообщения)
-    # Теперь бот должен сработать, объединить первые два сообщения и ответить.
-    {},
-]
-
-def get_auth_token(client_id, client_secret):
-    return "fake-bearer-token-12345"
-
-def get_new_responses(token):
-    """Имитируем ОДИН новый отклик, чтобы не было путаницы."""
-    return [
-        {
-            "id": "12348", 
-            "vacancy": {"id": "v4", "name": "Бариста"}, 
-            "resume": {"id": "r4", "first_name": "Мария"}
-        }
-    ]
-
-def send_message(token, negotiation_id, message_text):
-    print("="*50)
-    print(f"MOCK_API: Бот 'Анна' пишет кандидату ({negotiation_id}):")
-    print(f"  -> '{message_text}'")
-    print("="*50)
-    time.sleep(0.5)
-    return True
+    if not _initial_responses_sent:
+        print("MOCK_API: Найдены новые отклики, отправляю...")
+        _initial_responses_sent = True # <-- Ставим флаг, что мы их "отдали"
+        return [
+            {
+                "id": "resp_001",
+                "vacancy": {"id": "112233", "name": "Продавец-консультант"},
+                "resume": {"id": "res_A", "first_name": "Тестовый"},
+                "messages": [{"text": "Добрый день! Хотел бы узнать подробнее."}]
+            },
+            {
+                "id": "resp_002",
+                "vacancy": {"id": "445566", "name": "Бариста"},
+                "resume": {"id": "res_B", "first_name": "Тестовая"},
+                "messages": [{"text": "Здравствуйте, откликаюсь на вакансию Бариста."}]
+            },
+            {
+                "id": "resp_003", # Этот отклик будет проигнорирован, т.к. его нет в tracked_vacancies
+                "vacancy": {"id": "999999", "name": "Уборщица"},
+                "resume": {"id": "res_C", "first_name": "Лишний"},
+                "messages": [{"text": "test"}]
+            }
+        ]
+    else:
+        print("MOCK_API: Новых откликов нет.")
+        return []
 
 def get_new_messages(token):
     """
-    "Проигрывает" следующий шаг из нашего сценария.
+    Для чистоты теста эта функция пока не будет возвращать ничего,
+    чтобы мы протестировали только логику новых откликов.
     """
-    print("\nMOCK_API: Проверка входящих сообщений от кандидатов...")
-    time.sleep(1)
-    
-    if _MOCKED_MESSAGES_SCRIPT:
-        # Берем следующий "кадр" из сценария и удаляем его
-        next_messages = _MOCKED_MESSAGES_SCRIPT.pop(0)
-        return next_messages
-    else:
-        # Сценарий закончился
-        return {}
+    return {}
+
+def send_message(recruiter, db, negotiation_id, message_text):
+    print("="*50)
+    print(f"MOCK_API: Рекрутер '{recruiter.name}' пишет кандидату ({negotiation_id}):")
+    print(f"  -> '{message_text}'")
+    print("="*50)
+    return True

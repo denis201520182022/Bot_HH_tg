@@ -6,3 +6,4 @@ alembic.ini
 alembic/
 logs/
 credentials.json
+temp/

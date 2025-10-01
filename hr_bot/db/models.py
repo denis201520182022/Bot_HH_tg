@@ -1,3 +1,5 @@
+# hr_bot/db/models.py
+
 import datetime
 from sqlalchemy import (
     create_engine,
@@ -8,147 +10,118 @@ from sqlalchemy import (
     ForeignKey,
     DateTime,
     Date,
-    JSON
+    func
 )
+from sqlalchemy.dialects.postgresql import JSONB 
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import Numeric, Boolean
 
-# Строка подключения к вашей БД из .env файла
 DATABASE_URL = "postgresql+psycopg2://user_hr_bot:123@localhost:5432/hr_bot_db?client_encoding=utf8"
-
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
 Base = declarative_base()
+
 
 class Vacancy(Base):
     __tablename__ = 'vacancies'
-    id = Column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True, index=True)
     hh_vacancy_id = Column(String(50), unique=True)
     title = Column(String(255), nullable=False)
     city = Column(String(100))
-    # Связь для статистики
     statistics = relationship("Statistic", back_populates="vacancy")
     dialogues = relationship("Dialogue", back_populates="vacancy")
 
 class Candidate(Base):
     __tablename__ = 'candidates'
-    id = Column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True, index=True)
     hh_resume_id = Column(String(50), unique=True)
     full_name = Column(String(255))
     age = Column(Integer)
     citizenship = Column(String(100))
-    phone_number = Column(String(50), nullable=True) # nullable=True,
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    phone_number = Column(String(50), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    city = Column(String(255), nullable=True) # Поле с прошлого шага
+    
+    # --- ДОБАВЬТЕ ЭТУ СТРОКУ ---
+    readiness_to_start = Column(String(255), nullable=True)
     dialogues = relationship("Dialogue", back_populates="candidate")
 
-class Dialogue(Base):
-    """
-    Представляет уникальный диалог по конкретному отклику кандидата на вакансию.
-    Это центральная таблица, связывающая кандидатов и вакансии.
-    """
-    __tablename__ = 'dialogues'
-    
+class TrackedRecruiter(Base):
+    __tablename__ = 'tracked_recruiters'
     id = Column(Integer, primary_key=True, index=True)
-    
-    # --- Ключевые идентификаторы ---
-    # ID отклика на hh.ru (в их терминологии - negotiation_id). Должен быть уникальным.
+    recruiter_id = Column(String(50), unique=True, nullable=False)
+    name = Column(String(100))
+    refresh_token = Column(Text, nullable=True)
+    access_token = Column(Text, nullable=True)
+    token_expires_at = Column(DateTime(timezone=True), nullable=True)
+    dialogues = relationship("Dialogue", back_populates="recruiter")
+
+class Dialogue(Base):
+    __tablename__ = 'dialogues'
+    id = Column(Integer, primary_key=True, index=True)
     hh_response_id = Column(String(50), unique=True, nullable=False)
-    
-    # --- Связи с другими таблицами ---
+    recruiter_id = Column(Integer, ForeignKey('tracked_recruiters.id'))
     candidate_id = Column(Integer, ForeignKey('candidates.id'))
     vacancy_id = Column(Integer, ForeignKey('vacancies.id'))
-    
-    # --- Управление диалогом (FSM - Конечный автомат) ---
-    # Текущее состояние диалога, например, 'awaiting_age', 'scheduling_spb_time'.
     dialogue_state = Column(String(100))
-    
-    # --- Статус этого конкретного отклика ---
-    # 'new', 'qualified', 'rejected', 'interview_scheduled_spb', etc.
-    # Перенесено из Candidate, так как статус принадлежит отклику, а не кандидату в целом.
     status = Column(String(50), nullable=False, default='new')
-
-     # --- НОВОЕ ПОЛЕ ---
-    # Уровень отправленных напоминаний:
-    # 0 - не отправлено
-    # 1 - отправлено напоминание через 30 мин
-    # 2 - отправлено напоминание через 2 часа
-    # 3 - отправлено напоминание через 24 часа
-    # 4 - диалог "протух" и закрыт
     reminder_level = Column(Integer, nullable=False, default=0, server_default='0')
-    
-    # --- Хранилище данных ---
-    # Полная история переписки в формате JSON.
-    # Пример: [{'role': 'user', 'content': '...'}, {'role': 'assistant', 'content': '...'}]
-    history = Column(JSONB) # Для PostgreSQL используем JSONB
-
-    # --- Механизм отложенных ответов (Debouncing) ---
-    # Временное хранилище для сообщений, которые пришли от пользователя,
-    # но на которые бот еще не ответил, ожидая, пока пользователь закончит мысль.
-    # Очищается (ставится в NULL) после отправки ответа.
+    history = Column(JSONB)
     pending_messages = Column(JSONB)
-    
-    # --- Временные метки ---
-    # Время последнего обновления записи. Используется для определения "зависших" диалогов.
-    # Индекс (index=True) ускоряет поиск по этому полю.
-    last_updated = Column(DateTime, default=datetime.datetime.utcnow, 
-                          onupdate=datetime.datetime.utcnow, index=True) 
-
-    # --- "Навигация" SQLAlchemy ---
-    # Позволяет легко получать доступ к связанным объектам: dialogue.candidate, dialogue.vacancy
+    last_updated = Column(
+        DateTime(timezone=True), 
+        server_default=func.now(),
+        onupdate=func.now(),
+        index=True
+    )
     candidate = relationship("Candidate", back_populates="dialogues")
     vacancy = relationship("Vacancy", back_populates="dialogues")
+    recruiter = relationship("TrackedRecruiter", back_populates="dialogues")
 
 class Statistic(Base):
     __tablename__ = 'statistics'
-    id = Column(Integer, primary_key=True)
-    date = Column(Date, nullable=False)
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(Date, nullable=False, default=datetime.date.today)
     responses_count = Column(Integer, default=0)
     started_dialogs_count = Column(Integer, default=0)
     qualified_count = Column(Integer, default=0)
-    
     vacancy_id = Column(Integer, ForeignKey('vacancies.id'))
     vacancy = relationship("Vacancy", back_populates="statistics")
 
-
-# Команда для создания всех таблиц, если они не существуют
-# Base.metadata.create_all(bind=engine)
-
-# models.py
 class TelegramUser(Base):
     __tablename__ = 'telegram_users'
     id = Column(Integer, primary_key=True, index=True)
     telegram_id = Column(String(50), unique=True, nullable=False)
     username = Column(String(100))
-    role = Column(String(50), nullable=False, default='user') # 'user' или 'admin'
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-    # models.py
+    role = Column(String(50), nullable=False, default='user')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class NotificationQueue(Base):
     __tablename__ = 'notification_queue'
     id = Column(Integer, primary_key=True, index=True)
     candidate_id = Column(Integer, ForeignKey('candidates.id'), nullable=False)
-    status = Column(String(50), nullable=False, default='pending') # pending, sent, error
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    processed_at = Column(DateTime)
-    
+    status = Column(String(50), nullable=False, default='pending')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    processed_at = Column(DateTime(timezone=True))
     candidate = relationship("Candidate")
 
 class TrackedVacancy(Base):
-    #Список ID вакансий, отклики на которые нужно обрабатывать."""
     __tablename__ = 'tracked_vacancies'
     id = Column(Integer, primary_key=True, index=True)
-    # ID вакансии на hh.ru
     vacancy_id = Column(String(50), unique=True, nullable=False)
-    # Название (для удобства админов)
-    title = Column(String(255)) 
+    title = Column(String(255))
 
-class TrackedRecruiter(Base):
-    #"""Список ID рекрутеров, отклики которых нужно обрабатывать."""
-    __tablename__ = 'tracked_recruiters'
-    id = Column(Integer, primary_key=True, index=True)
-    # ID пользователя (рекрутера) на hh.ru
-    recruiter_id = Column(String(50), unique=True, nullable=False)
-    # Имя (для удобства админов)
-    name = Column(String(100))
+
+class AppSettings(Base):
+    """Глобальные настройки приложения (лимиты, тарифы)."""
+    __tablename__ = 'app_settings'
+    
+    id = Column(Integer, primary_key=True)
+    # Общее количество разрешенных откликов
+    limit_total = Column(Integer, nullable=False, default=50)
+    # Количество уже использованных откликов
+    limit_used = Column(Integer, nullable=False, default=0)
+    # Стоимость одного отклика (используем Numeric для точности)
+    cost_per_response = Column(Numeric(10, 2), nullable=False, default=100.00)
+    # Флаг, который показывает, было ли уже отправлено уведомление о низком лимите
+    low_limit_notified = Column(Boolean, nullable=False, default=False)

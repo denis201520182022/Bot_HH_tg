@@ -54,15 +54,29 @@ if __name__ == "__main__":
     
     webbrowser.open(auth_url)
     
-    print("Step 2: Waiting for the authorization code on http://localhost:8000/ ...")
+    print("Step 2: Waiting for the authorization code on http://localhost:8010/ ...")
     
-    httpd = HTTPServer(('localhost', 8000), OAuthCallbackHandler)
+    httpd = HTTPServer(('localhost', 8010), OAuthCallbackHandler)
     httpd.handle_request() # This will handle one request and then stop.
     
     if authorization_code:
         tokens = get_tokens(authorization_code)
-        if tokens and 'refresh_token' in tokens:
+        if tokens:
             print("\n" + "="*80)
-            print("!!! YOUR REFRESH TOKEN (save it to .env file) !!!")
-            print(f"HH_REFRESH_TOKEN=\"{tokens['refresh_token']}\"")
+            print("!!! ПОЛУЧЕНЫ НОВЫЕ ТОКЕНЫ. Сохраните их в БД !!!")
+            print("-" * 80)
+            print(f"ACCESS TOKEN:  {tokens['access_token']}")
+            print(f"REFRESH TOKEN: {tokens['refresh_token']}")
+            print(f"EXPIRES IN (сек): {tokens['expires_in']}")
+            print("-" * 80)
+            print("Выполните SQL-запрос в pgAdmin, подставив эти значения:")
+            print(f"""
+UPDATE tracked_recruiters
+SET 
+    access_token = '{tokens['access_token']}',
+    refresh_token = '{tokens['refresh_token']}',
+    token_expires_at = NOW() + INTERVAL '{tokens['expires_in']} seconds'
+WHERE 
+    recruiter_id = 'ВАШ_RECRUITER_ID';
+            """)
             print("="*80)
