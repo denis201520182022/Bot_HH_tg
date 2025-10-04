@@ -3,18 +3,41 @@
 import os
 import json
 import logging
-import openai
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
+import httpx
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# Асинхронный клиент OpenAI, настроенный на работу через прокси
-client = openai.AsyncOpenAI(
-    base_url=os.getenv("OPENAI_PROXY_URL"),
+# Загружаем настройки прокси из .env
+SQUID_PROXY_HOST = os.getenv("SQUID_PROXY_HOST", "38.180.203.212")
+SQUID_PROXY_PORT = os.getenv("SQUID_PROXY_PORT", "8787")
+SQUID_PROXY_USER = os.getenv("SQUID_PROXY_USER", "zabota")
+SQUID_PROXY_PASSWORD = os.getenv("SQUID_PROXY_PASSWORD", "zabota2000")
+
+# Формируем URL прокси с аутентификацией
+proxy_url = (
+    f"http://{SQUID_PROXY_USER}:{SQUID_PROXY_PASSWORD}@"
+    f"{SQUID_PROXY_HOST}:{SQUID_PROXY_PORT}"
 )
 
-# --- ОБНОВЛЕННЫЙ БЛОК ИНСТРУКЦИЙ ДЛЯ OPENAI ---
+# Создаем асинхронный HTTP клиент с настройками прокси
+async_http_client = httpx.AsyncClient(
+    proxy=proxy_url,
+    timeout=30.0
+)
+
+# Создаем АСИНХРОННЫЙ OpenAI клиент и передаем ему наш HTTP клиент
+client = AsyncOpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    http_client=async_http_client
+)
+
+logger.info(f"Клиент OpenAI настроен на работу через прокси: {SQUID_PROXY_HOST}:{SQUID_PROXY_PORT}")
+
+
+# --- БЛОК ИНСТРУКЦИЙ ДЛЯ OPENAI ---
 JSON_FORMAT_INSTRUCTION = """
 \n\n[CRITICAL RULE] Твой ответ ВСЕГДА должен быть в формате JSON.
 Структура JSON должна быть следующей:
@@ -86,3 +109,12 @@ async def get_bot_response(system_prompt: str, dialogue_history: list, user_mess
             "new_state": "error_state",
             "extracted_data": None
         }
+
+
+async def cleanup():
+    """
+    Закрывает HTTP клиент при завершении работы приложения.
+    Вызовите эту функцию в shutdown hook вашего приложения.
+    """
+    await async_http_client.aclose()
+    logger.info("🔒 HTTP клиент закрыт")

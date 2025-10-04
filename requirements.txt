@@ -11,3 +11,4 @@ requests
 SQLAlchemy
 pandas 
 openpyxl
+httpx

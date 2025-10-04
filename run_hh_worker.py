@@ -26,6 +26,48 @@ TEST_NEGOTIATION_ID = "4784948954" # Установите в None для бое�
 
 # --- НАЧАЛО ФИНАЛЬНОГО РЕФАКТОРИНГА ---
 
+# run_hh_worker.py
+
+# ... (ваши импорты и конфигурация) ...
+
+async def get_all_active_vacancies_for_recruiter(recruiter: TrackedRecruiter, db: Session) -> list:
+    """
+    Получает список всех активных вакансий для конкретного рекрутера через API hh.ru.
+    Возвращает список словарей, где каждый словарь содержит 'id' и 'title' вакансии.
+    """
+    logger.info(f"Получение списка активных вакансий для рекрутера {recruiter.name}...")
+    try:
+        # Шаг 1: Получаем employer_id
+        me_data = await hh_api._make_request(recruiter, db, "GET", "me", add_user_agent=True)
+        if not me_data or not me_data.get('employer') or not me_data['employer'].get('id'):
+            logger.error(f"Не удалось получить employer_id для рекрутера {recruiter.name}.")
+            return []
+        employer_id = me_data['employer']['id']
+
+        # Шаг 2: Получаем все страницы с вакансиями
+        all_vacancies = []
+        page = 0
+        while True:
+            vacancies_page = await hh_api._make_request(
+                recruiter, db, "GET", f"employers/{employer_id}/vacancies/active",
+                params={'page': page, 'per_page': 50}, add_user_agent=True
+            )
+            if not vacancies_page or not vacancies_page.get('items'):
+                break
+            
+            all_vacancies.extend(vacancies_page['items'])
+            
+            if page >= vacancies_page.get('pages', 1) - 1:
+                break
+            page += 1
+        
+        logger.info(f"Найдено {len(all_vacancies)} активных вакансий для рекрутера {recruiter.name}.")
+        return [{'id': v.get('id'), 'title': v.get('name')} for v in all_vacancies]
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка вакансий для рекрутера {recruiter.name}: {e}", exc_info=True)
+        return []
+
 async def process_new_responses(recruiter_id: int, vacancy_id: str, vacancy_title: str):
     """Этап 1: Ищет новые отклики. Работает в собственной сессии БД."""
     db = SessionLocal()
@@ -351,8 +393,8 @@ async def run_worker_cycle():
         
         db = SessionLocal()
         try:
+            # Таблицу tracked_vacancies мы больше не используем
             all_recruiters = db.query(TrackedRecruiter).all()
-            all_vacancies = db.query(TrackedVacancy).all()
         finally:
             db.close()
 
@@ -363,22 +405,32 @@ async def run_worker_cycle():
         main_tasks = []
         for recruiter in all_recruiters:
             async def handle_recruiter(rec):
+                db_session = SessionLocal() # Создаем сессию для этого рекрутера
                 try:
                     logger.info(f"--- Начинаю работу с рекрутером: {rec.name} (ID: {rec.id}) ---")
                     
-                    scan_tasks = []
-                    if all_vacancies:
-                        for vacancy in all_vacancies:
-                            scan_tasks.append(process_new_responses(rec.id, vacancy.vacancy_id, vacancy.title))
-                            scan_tasks.append(process_ongoing_responses(rec.id, vacancy.vacancy_id, vacancy.title))
+                    # Получаем список вакансий через API
+                    active_vacancies = await get_all_active_vacancies_for_recruiter(rec, db_session)
+                    
+                    if active_vacancies:
+                        scan_tasks = []
+                        # Мы больше не передаем title, так как он будет извлекаться из отклика
+                        vacancy_ids = [v['id'] for v in active_vacancies]
+                        
+                        # Запускаем проверку сразу для ВСЕХ вакансий
+                        scan_tasks.append(process_new_responses(rec.id, vacancy_ids))
+                        scan_tasks.append(process_ongoing_responses(rec.id, vacancy_ids))
+                        
                         await asyncio.gather(*scan_tasks)
                     else:
-                        logger.warning(f"Для рекрутера {rec.name} нет отслеживаемых вакансий.")
+                        logger.warning(f"Для рекрутера {rec.name} не найдено активных вакансий.")
 
                     await process_pending_dialogues(rec.id, system_prompt)
                     await process_reminders(rec.id)
                 except Exception as e:
                     logger.error(f"Ошибка при обработке рекрутера {rec.name}: {e}", exc_info=True)
+                finally:
+                    db_session.close()
 
             main_tasks.append(handle_recruiter(recruiter))
         
@@ -389,19 +441,51 @@ async def run_worker_cycle():
     finally:
         logger.info("Цикл воркера завершен.")
 
+import signal
+import sys
+from hr_bot.services.llm_handler import cleanup
+
+# Флаг для graceful shutdown
+shutdown_requested = False
+
+def signal_handler(sig, frame):
+    """Обработчик сигналов для graceful shutdown"""
+    global shutdown_requested
+    logger.info("Получен сигнал остановки. Завершаем работу...")
+    shutdown_requested = True
 
 if __name__ == "__main__":
     setup_logging(log_filename="hh_worker.log")
     load_dotenv()
+    
+    # Регистрируем обработчики сигналов
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     logger.info("HH-Worker запускается...")
-    while True:
-        try:
-            asyncio.run(run_worker_cycle())
-            logger.info(f"Пауза {CYCLE_PAUSE_SECONDS} секунд перед следующим циклом.")
-            time.sleep(CYCLE_PAUSE_SECONDS)
-        except (KeyboardInterrupt, SystemExit):
-            logger.info("HH-Worker остановлен вручную.")
-            break
-        except Exception as e:
-            logger.critical(f"Неперехваченная критическая ошибка в главном цикле: {e}", exc_info=True)
-            time.sleep(120)
+    
+    try:
+        while not shutdown_requested:
+            try:
+                asyncio.run(run_worker_cycle())
+                logger.info(f"Пауза {CYCLE_PAUSE_SECONDS} секунд перед следующим циклом.")
+                
+                # Проверяем флаг shutdown во время паузы
+                for _ in range(CYCLE_PAUSE_SECONDS):
+                    if shutdown_requested:
+                        break
+                    time.sleep(1)
+                    
+            except (KeyboardInterrupt, SystemExit):
+                logger.info("HH-Worker остановлен вручную.")
+                shutdown_requested = True
+                break
+            except Exception as e:
+                logger.critical(f"Неперехваченная критическая ошибка в главном цикле: {e}", exc_info=True)
+                if not shutdown_requested:
+                    time.sleep(120)
+    finally:
+        # Закрываем HTTP клиент перед выходом
+        logger.info("Закрываем соединения...")
+        asyncio.run(cleanup())
+        logger.info("HH-Worker полностью остановлен.")
