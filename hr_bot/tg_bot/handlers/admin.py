@@ -1,4 +1,3 @@
-
 import logging
 import datetime
 from aiogram import Router, F
@@ -9,11 +8,12 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.orm import Session
 from aiogram.utils.formatting import Text, Bold, Italic, Code
 
-from hr_bot.db.models import TelegramUser, TrackedVacancy, TrackedRecruiter, AppSettings
+from hr_bot.db.models import TelegramUser, TrackedRecruiter, AppSettings
+# Убрали импорт TrackedVacancy, так как он больше не используется
 from hr_bot.tg_bot.filters import AdminFilter
 from hr_bot.tg_bot.keyboards import (
-    create_management_keyboard, 
-    role_choice_keyboard, 
+    create_management_keyboard,
+    role_choice_keyboard,
     cancel_fsm_keyboard,
     limits_menu_keyboard,
     limit_options_keyboard,
@@ -28,8 +28,7 @@ router.message.filter(AdminFilter())
 class UserManagement(StatesGroup):
     add_id = State(); add_name = State(); add_role = State(); del_id = State()
 
-class VacancyManagement(StatesGroup):
-    add_id = State(); add_title = State(); del_id = State()
+# --- КЛАСС VacancyManagement УДАЛЕН ---
 
 class RecruiterManagement(StatesGroup):
     add_id = State(); add_name = State(); add_refresh_token = State()
@@ -213,95 +212,10 @@ async def process_del_user_id(message: Message, state: FSMContext, db_session: S
     logger.info(f"Админ {message.from_user.id} удалил пользователя {deleted_id}")
     content = Text("✅ Пользователь ", Bold(deleted_username), " (ID: ", Code(deleted_id), ") был удален.")
     await message.answer(**content.as_kwargs())
-# --- 2. УПРАВЛЕНИЕ ВАКАНСИЯМИ ---
 
-@router.message(F.text == "📝 Управление вакансиями")
-async def vacancy_management_menu(message: Message, db_session: Session):
-    vacancies = db_session.query(TrackedVacancy).all()
-    content_parts = [Bold("📝 Отслеживаемые вакансии:"), "\n\n"]
-    if not vacancies:
-        content_parts.append(Italic("Список пуст."))
-    else:
-        for v in vacancies:
-            content_parts.extend(["- ", Bold(v.title), " (ID: ", Code(v.vacancy_id), ")\n"])
-    content_parts.append("\nВыберите действие:")
-    
-    content = Text(*content_parts)
-    await message.answer(**content.as_kwargs(), reply_markup=create_management_keyboard([], "add_vacancy", "del_vacancy"))
-
-@router.callback_query(F.data == "add_vacancy")
-async def start_add_vacancy(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(VacancyManagement.add_id)
-    content = Text("Введите ID вакансии с hh.ru для отслеживания.")
-    await callback.message.edit_text(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
-    await callback.answer()
-
-@router.message(VacancyManagement.add_id)
-async def process_add_vacancy_id(message: Message, state: FSMContext, db_session: Session):
-    if not message.text or not message.text.isdigit():
-        content = Text("❌ ID должен быть числом. Попробуйте еще раз.")
-        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
-        return
-    vacancy_id = message.text
-    if db_session.query(TrackedVacancy).filter_by(vacancy_id=vacancy_id).first():
-        content = Text("⚠️ Вакансия с ID ", Code(vacancy_id), " уже отслеживается. Действие отменено.")
-        await message.answer(**content.as_kwargs())
-        await state.clear()
-        return
-    await state.update_data(vacancy_id=vacancy_id)
-    await state.set_state(VacancyManagement.add_title)
-    content = Text("Отлично. Теперь введите название этой вакансии (для вашего удобства).")
-    await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
-
-@router.message(VacancyManagement.add_title)
-async def process_add_vacancy_title(message: Message, state: FSMContext, db_session: Session):
-    if not message.text:
-        content = Text("❌ Название не может быть пустым. Попробуйте еще раз.")
-        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
-        return
-    data = await state.get_data()
-    vacancy_id = data['vacancy_id']
-    title = message.text
-    new_vacancy = TrackedVacancy(vacancy_id=vacancy_id, title=title)
-    db_session.add(new_vacancy)
-    db_session.commit()
-    await state.clear()
-    logger.info(f"Админ {message.from_user.id} добавил вакансию {title} ({vacancy_id})")
-    
-    content = Text("✅ Вакансия ", Bold(title), " (ID: ", Code(vacancy_id), ") добавлена в список.")
-    await message.answer(**content.as_kwargs())
-
-@router.callback_query(F.data == "del_vacancy")
-async def start_del_vacancy(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(VacancyManagement.del_id)
-    content = Text("Введите ID вакансии для удаления из списка.")
-    await callback.message.edit_text(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
-    await callback.answer()
-
-@router.message(VacancyManagement.del_id)
-async def process_del_vacancy_id(message: Message, state: FSMContext, db_session: Session):
-    if not message.text or not message.text.isdigit():
-        content = Text("❌ ID должен быть числом. Попробуйте еще раз.")
-        await message.answer(**content.as_kwargs(), reply_markup=cancel_fsm_keyboard)
-        return
-    vacancy_id = message.text
-    vacancy_to_delete = db_session.query(TrackedVacancy).filter_by(vacancy_id=vacancy_id).first()
-    if not vacancy_to_delete:
-        content = Text("⚠️ Вакансия с ID ", Code(vacancy_id), " не найдена. Действие отменено.")
-        await message.answer(**content.as_kwargs())
-        await state.clear()
-        return
-    deleted_title = vacancy_to_delete.title
-    db_session.delete(vacancy_to_delete)
-    db_session.commit()
-    await state.clear()
-    logger.info(f"Админ {message.from_user.id} удалил вакансию {vacancy_id}")
-    
-    content = Text("✅ Вакансия ", Bold(deleted_title), " (ID: ", Code(vacancy_id), ") удалена.")
-    await message.answer(**content.as_kwargs())
+# --- БЛОК УПРАВЛЕНИЯ ВАКАНСИЯМИ ПОЛНОСТЬЮ УДАЛЕН ---
 
 # --- 3. УПРАВЛЕНИЕ РЕКРУТЕРАМИ ---
-
 @router.message(F.text == "👨‍💼 Управление рекрутерами")
 async def recruiter_management_menu(message: Message, db_session: Session):
     recruiters = db_session.query(TrackedRecruiter).all()

@@ -24,7 +24,7 @@ admin_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⚙️ Лимиты и Тариф")],
         [KeyboardButton(text="👤 Управление пользователями")],
-        [KeyboardButton(text="📝 Управление вакансиями"), KeyboardButton(text="👨‍💼 Управление рекрутерами")],
+        [KeyboardButton(text="👨‍💼 Управление рекрутерами")],
         [KeyboardButton(text="❓ Помощь")]
     ],
     resize_keyboard=True,
