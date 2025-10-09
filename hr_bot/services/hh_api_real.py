@@ -63,7 +63,7 @@ async def get_access_token(recruiter: TrackedRecruiter, db: Session) -> str | No
             error_description = error_data.get("error_description")
 
             if error_description == "token not expired":
-                logger.warning(
+                logger.error(
                     f"Попытка обновить токен для {recruiter.name} отклонена: токен еще не истек. "
                     f"Возвращаем старый токен, так как он все еще действителен."
                 )
@@ -156,15 +156,13 @@ async def get_responses_from_folder(
 ) -> list:
     """
     Асинхронно получает список откликов из указанной папки,
-    делая ОТДЕЛЬНЫЙ запрос для КАЖДОЙ вакансии.
+    делая ОТДЕЛЬНЫЙ запрос для КАЖДОЙ вакансии и "помечая" каждый отклик
+    ID его вакансии.
     """
-    logger.info(
+    logger.debug(
         f"REAL_API: Запрос откликов из папки '{folder_id}' для {len(vacancy_ids)} вакансий..."
     )
     
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    
-    # Создаем список асинхронных задач, по одной на каждую вакансию
     tasks = []
     
     for vacancy_id in vacancy_ids:
@@ -173,34 +171,32 @@ async def get_responses_from_folder(
             
         async def fetch_for_vacancy(vid):
             try:
-                # Параметры теперь содержат только один ID вакансии
-                params = {
-                    "vacancy_id": str(vid),
-                    "page": "0",
-                    "per_page": "50" # Можно увеличить, если на одну вакансию много откликов
-                }
+                params = {"vacancy_id": str(vid), "page": "0", "per_page": "50"}
                 response_data = await _make_request(
                     recruiter, db, "GET", f"negotiations/{folder_id}", params=params
                 )
-                return response_data.get("items", []) if response_data else []
+                items = response_data.get("items", []) if response_data else []
+                
+                # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+                # Возвращаем не просто список откликов, а список пар (отклик, ID вакансии)
+                return [(item, str(vid)) for item in items]
+                # -------------------------
+
             except Exception as e:
                 logger.error(f"Ошибка при запросе откликов для вакансии {vid} в папке '{folder_id}': {e}")
-                return [] # В случае ошибки для одной вакансии, возвращаем пустой список
+                return []
 
         tasks.append(fetch_for_vacancy(vacancy_id))
 
-    # Запускаем все запросы параллельно и ждем их завершения
     results_from_all_vacancies = await asyncio.gather(*tasks)
     
-    # Объединяем все полученные списки откликов в один большой список
-    all_responses = []
+    all_responses_with_vacancy_id = []
     for single_vacancy_responses in results_from_all_vacancies:
-        all_responses.extend(single_vacancy_responses)
+        all_responses_with_vacancy_id.extend(single_vacancy_responses)
         
-    logger.info(f"Суммарно найдено {len(all_responses)} откликов в папке '{folder_id}'.")
-    return all_responses
-    
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+    # Теперь лог более точный
+    logger.debug(f"Суммарно найдено {len(all_responses_with_vacancy_id)} откликов в папке '{folder_id}'.")
+    return all_responses_with_vacancy_id
 
 async def get_messages(recruiter: TrackedRecruiter, db: Session, messages_url: str) -> list:
     """Асинхронно получает ПОЛНУЮ историю сообщений постранично."""

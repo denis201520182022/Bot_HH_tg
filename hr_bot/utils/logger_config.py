@@ -37,7 +37,7 @@ def setup_logging(log_filename: str):
         os.path.join(log_dir, log_filename),
         when='midnight',
         interval=1,
-        backupCount=7,
+        backupCount=4,
         encoding='utf-8'
     )
     file_handler.setFormatter(formatter)
@@ -49,3 +49,4 @@ def setup_logging(log_filename: str):
     # Устанавливаем уровень INFO для "шумных" библиотек, чтобы не засорять логи
     logging.getLogger('aiogram').setLevel(logging.INFO)
     logging.getLogger('httpx').setLevel(logging.WARNING) # Логи httpx могут быть слишком подробными
+    logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.WARNING)

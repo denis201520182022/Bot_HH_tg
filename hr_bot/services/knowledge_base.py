@@ -1,23 +1,35 @@
+import time
+import logging  # <--- ДОБАВЛЕНО
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-# ID вашего гугл-документа. Его можно взять из URL:
-# https://docs.google.com/document/d/THIS_IS_THE_ID/edit
+# --- ДОБАВЛЕНО: Получаем логгер для этого модуля ---
+logger = logging.getLogger(__name__)
+
+# ID вашего гугл-документа
 DOCUMENT_ID = '1injke_YH-E2RRHL4PYvXk7kOWPk58-S0cPzLDnzeRnA'
 SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
 SERVICE_ACCOUNT_FILE = 'credentials.json'
 
+# Время жизни кэша в секундах (5 минут)
+CACHE_TTL_SECONDS = 120 
+
 _cached_prompt = None
+_cache_timestamp = 0
 
 def get_system_prompt():
     """
     Читает весь текст из Google Doc и возвращает его как одну строку.
-    Кэширует результат, чтобы не читать файл при каждом запуске.
+    Кэширует результат на CACHE_TTL_SECONDS секунд.
     """
-    global _cached_prompt
-    if _cached_prompt:
+    global _cached_prompt, _cache_timestamp
+
+    is_cache_valid = _cached_prompt and (time.time() - _cache_timestamp < CACHE_TTL_SECONDS)
+
+    if is_cache_valid:
         return _cached_prompt
 
+    logger.debug("Кэш базы знаний устарел, обновляю из Google Docs...")
     try:
         creds = Credentials.from_service_account_file(
             SERVICE_ACCOUNT_FILE, scopes=SCOPES)
@@ -34,17 +46,26 @@ def get_system_prompt():
                 for elem in elements:
                     text += elem.get('textRun', {}).get('content', '')
         
-        print("База знаний из Google Docs успешно загружена.")
+        logger.debug("База знаний из Google Docs успешно загружена.")
+        
         _cached_prompt = text
+        _cache_timestamp = time.time()
+        
         return text
 
     except Exception as e:
-        print(f"!!! ОШИБКА при чтении Google Doc: {e}")
-        # В случае ошибки возвращаем "запасной" промпт
-        return "Ты — полезный ассистент."
+        # Ошибки всегда должны иметь высокий уровень, чтобы их было видно
+        logger.error(f"ОШИБКА при чтении Google Doc: {e}", exc_info=True)
+        
+        if _cached_prompt:
+            # Предупреждение о том, что мы используем старые данные - это важно
+            logger.warning("Возвращаю старую версию промпта из кэша.")
+            return _cached_prompt
+        
+        return "Ты - Hr компании ВкусВилл. Проводишь первичный отбор кандидатов на hh"
 
 if __name__ == '__main__':
-    # Тестируем, что модуль работает
+    # Для блоков ручного тестирования print - это нормально
     prompt = get_system_prompt()
     print("\n--- Загруженный промпт (первые 300 символов) ---")
     print(prompt[:300] + "...")

@@ -13,7 +13,7 @@ sudo systemctl status hh_bot_worker
 sudo journalctl -u hh_bot_worker -f
 sudo systemctl stop hh_bot_worker
 sudo systemctl enable hh_bot_worker
-
+sudo systemctl restart hh_bot_worker
 
 
 curl -X POST "https://api.hh.ru/token" \
